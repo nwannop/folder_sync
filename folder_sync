@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import shutil
+import time
+from datetime import datetime, timedelta
+
+class Logger:
+    def __init__(self, logfile_path):
+        self.path = logfile_path
+
+    def output(self, string):
+        dt = datetime.now().strftime("%m/%d/%Y, %H:%M:%S")
+        output = f"{dt}: {string}"
+        print(output)
+        with open(self.path, "a") as f:
+            f.write(f"{output}\n")
+    
+
+class FileSync:
+
+    def __init__(self, inputArgs):
+        self.syncReady = self.validateArgs(inputArgs)
+        if self.syncReady:
+            self.logger = Logger(self.logFilePath)
+
+    def log(self, string):
+        self.logger.output(string)
+
+    def walkError(self, e):
+        self.log(e)
+
+    def fetchDirContents(self, path, location):
+        dir_list = []
+        file_list = []
+        try:
+            #walk location from top down
+            for root, dirs, files in os.walk(path, True, self.walkError):
+                for name in dirs:
+                    relative_path = os.path.relpath(os.path.join(root, name), path)
+                    dir_list.append(relative_path)
+                for name in files:
+                    relative_path = os.path.relpath(os.path.join(root, name), path)
+                    file_list.append(relative_path)
+
+            self.log(F"Reading {location} directory: " + path)
+
+        except IOError as e:
+            self.log(f"Error reading {location} directory: {e}")
+
+        return (dir_list, file_list)
+
+    def sync(self, source_path, destination_path):
+         #try to write to log
+        self.log(f"Begin file sync from source directory {source_path} to destination {destination_path}")
+
+        #get dir and file lists for source
+        source_lists = self.fetchDirContents(source_path, "source")
+        source_dir_list = source_lists[0]
+        source_file_list = source_lists[1]
+
+        #create dir if doesn't exist
+        if not os.path.isdir(destination_path):
+            os.mkdir(destination_path)
+
+        #get dir and file lists for destination
+        destination_lists = self.fetchDirContents(destination_path, "destination")
+        destination_dir_list = destination_lists[0]
+        destination_file_list = destination_lists[1]
+
+        #compare source to destination
+        #check for new directories
+        for rel_dir_path in source_dir_list:
+            dest_dir_path = os.path.join(destination_path, rel_dir_path)
+            if rel_dir_path not in destination_dir_list:
+                #the directory is new and should be created in destination, files will be copied next
+                os.mkdir(dest_dir_path)
+                self.log(f"Creating new directory: {dest_dir_path}")
+        
+        #check for new files   
+        for rel_file_path in source_file_list: #!!WE DON'T STORE MODIFIED IN SOURCE_FILE_LIST ANYMORE
+            source_file_path = os.path.join(source_path, rel_file_path)
+            dest_file_path = os.path.join(destination_path, rel_file_path)
+            if rel_file_path not in destination_file_list:
+                #new file, copy
+                shutil.copy2(source_file_path, dest_file_path)
+                self.log(f"Copying new file: {dest_file_path}")
+        
+        #compare destination to source
+        #update changed files
+        for rel_file_path in destination_file_list:
+            dest_file_path = os.path.join(destination_path, rel_file_path)
+            source_file_path = os.path.join(source_path, rel_file_path)
+            if rel_file_path not in source_file_list:
+                #old file, delete
+                os.remove(dest_file_path)
+                self.log(f"Deleting file: {dest_file_path}")
+            #existing, check modified
+            elif os.path.getmtime(dest_file_path) != os.path.getmtime(source_file_path):
+                    #outdated file, replace
+                    shutil.copy2(source_file_path, dest_file_path)
+                    self.log(f"Updating file: {dest_file_path}")
+            else:
+                self.log(f"Ignoring up to date file: {dest_file_path}")
+        
+        #check for old dirs (we assume dirs are empty, files should have been deleted)
+        for rel_dir_path in destination_dir_list:
+            if rel_dir_path not in source_dir_list:
+                dest_dir_path = os.path.join(destination_path, rel_dir_path)
+                #old dir, delete
+                os.rmdir(dest_dir_path)
+                self.log(f"Deleting directory: {dest_dir_path}")
+
+    def validateArgs(self, args):
+        #insufficient args should always fail
+        if len(args) < 5:
+            print("Error: Insufficient arguments received. Expected arguments are:")
+            print("\t source directory (must exist)")
+            print("\t destination directory (if it does not exist it will be created)")
+            print("\t sync interval in seconds (between 1 and 315400000)")
+            print("\t path to a log file for output (if the file does not exist, it will be created)")
+            return False
+        
+        #ready flag is switched on failure, return after full validation to collect validation errors
+        ready = True;
+        if isinstance(args[1], str) and os.path.isdir(args[1]):
+            self.sourceDirectory = args[1]
+        else:
+            #print error return false
+            print("Error: Invalid directory name or error accessing source directory")
+            ready =  False
+
+        if isinstance(args[2], str):
+            self.destinationDirectory = args[2]
+        else:
+            #print error return false
+            print("Error: Destination directory must be a valid directory name")
+            ready =  False
+
+        try:
+            timeInterval = float(args[3])
+            if timeInterval > 1 and timeInterval <= 315400000:
+                self.timeInterval = args[3]
+            else:
+                #print error return false
+                print("Error: Time interval must be between 1 and 315400000")
+                ready =  False
+        except ValueError:
+            print("Error: sync interval must be int or float")
+
+        if isinstance(args[4], str):
+            self.logFilePath = args[4]
+        else:
+            #print error return false
+            print("Error: Logfile name must be a valid file name")
+            ready =  False
+
+        return ready
+
+
+    def startSync(self):
+        try:
+            while self.syncReady:
+                self.sync(self.sourceDirectory, self.destinationDirectory)
+                self.log("Sync complete.")
+                nextRunTime = datetime.now() + timedelta(seconds=float(self.timeInterval))
+                nextRunTimeStr = nextRunTime.strftime("%m/%d/%Y, %H:%M:%S")
+                self.log(f"Next sync scheduled for {nextRunTimeStr}")
+                time.sleep(float(self.timeInterval))
+
+            print("Sync cancelled.")
+        except KeyboardInterrupt:
+            self.log("Sync schedule cancelled by user.")
+                        
+fileSync = FileSync(sys.argv)
+
+fileSync.startSync()
